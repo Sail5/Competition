@@ -1,0 +1,133 @@
+import re
+import pandas as pd
+import MeCab
+import numpy as np
+from tensorflow.keras import layers
+from tensorflow.keras.preprocessing.text import Tokenizer
+from tensorflow.keras.preprocessing.sequence import pad_sequences
+from tensorflow import keras
+from keras.layers import InputLayer
+from keras import optimizers
+from sklearn.model_selection import train_test_split
+from sklearn.metrics import f1_score
+from sklearn.metrics import confusion_matrix
+from keras.callbacks import EarlyStopping
+
+# ファイル読み込み
+df_train = pd.read_csv('パス/train.csv', encoding='utf-8')
+train_body = df_train['body']
+df_test = pd.read_csv('パス/test.csv', encoding='utf-8')
+test_body = df_test['body']
+opt = optimizers.Adam(lr=0.01)
+
+def convert(text):
+    # ルビ、注釈などの除去
+    text = re.sub('|', '', text)
+    text = re.sub('《.*?》', '', text)
+    text = re.sub('\r\n', '\r', text)
+    text = re.sub('\r', '', text)
+    text = re.sub('\n', '', text)
+    text = re.sub('\u3000', '', text)
+    text = re.sub('［.*?］', '', text)
+    text = re.sub('、', '', text)
+    text = re.sub('。', '', text)
+    text = re.sub(r'[一二三四五六七八九十百千万億兆]', '', text)  # 漢数字の除去
+    return text
+
+def extract_nouns_verbs_adjectives(text):
+    tagger = MeCab.Tagger()
+    tagger.parse('')
+    node = tagger.parseToNode(text)
+
+    nouns_verbs_adjectives = []
+    while node:
+        pos = node.feature.split(',')[0]
+        if pos in ['名詞', '動詞', '形容詞']:
+            nouns_verbs_adjectives.append(node.surface)
+        node = node.next
+
+    return nouns_verbs_adjectives
+
+# リストの定義
+train_list = []
+test_list = []
+
+# trainの前処理
+for i in range(len(train_body)):
+    train_convert = convert(train_body[i])
+    train_nouns_verbs_adjectives = extract_nouns_verbs_adjectives(train_convert)
+    train_list.append(train_nouns_verbs_adjectives)
+
+# testの前処理
+for i in range(len(test_body)):
+    test_convert = convert(test_body[i])
+    test_nouns_verbs_adjectives = extract_nouns_verbs_adjectives(test_convert)
+    test_list.append(test_nouns_verbs_adjectives)
+
+# ハイパーパラメータの設定
+num_words = 40000
+
+def build_vocabulary(texts, num_words=None):
+    tokenizer = Tokenizer(num_words=num_words, oov_token='<UNK>')
+    tokenizer.fit_on_texts(texts)
+    return tokenizer
+
+# データセットの前処理(ID化)
+x = train_list
+y = df_train['author']
+
+max_len = 300
+
+# リストをDataFrameに変換
+df = pd.DataFrame({'text': x, 'author': y})
+
+# Tokenizerを初期化して単語ID化を行う関数を定義
+def word_to_id(texts):
+    tokenizer = Tokenizer()
+    tokenizer.fit_on_texts(texts)
+    sequences = tokenizer.texts_to_sequences(texts)
+    padded_sequences = pad_sequences(sequences, maxlen=max_len)
+    return padded_sequences
+
+# テキストを単語IDのシーケンスに変換
+x = word_to_id(x)
+
+vocab = build_vocabulary(x, num_words)
+x_ids = vocab.texts_to_sequences(x)
+x_padded = pad_sequences(x_ids, maxlen=max_len)
+x_padded = np.asarray(x_padded).astype('float32')
+
+x_train, x_val, y_train, y_val = train_test_split(x_padded, y, test_size=0.2, random_state=42)
+
+# モデル
+model = keras.Sequential()
+model.add(InputLayer(input_shape=(max_len,)))
+model.add(layers.Embedding(input_dim=num_words, output_dim=64))
+model.add(layers.LSTM(64))
+model.add(layers.Dense(1, activation='sigmoid'))
+
+model.compile(loss='binary_crossentropy', optimizer=opt, metrics=['accuracy'])
+
+early_stopping = EarlyStopping(monitor='val_loss', patience=5, restore_best_weights=True)
+
+log = model.fit(x_train, y_train, epochs=100, validation_split=0.2, batch_size=128, callbacks=[early_stopping])
+
+y_pred_val = model.predict(x_val).flatten()
+
+y_pred_val1 = (y_pred_val >= 0.1).astype(int)
+F1_score = f1_score(y_val, y_pred_val1)
+print(F1_score)
+
+cm = confusion_matrix(y_val, y_pred_val1)
+print(cm)
+
+x_test = test_list
+
+# テキストを単語IDのシーケンスに変換
+x_test_ids = vocab.texts_to_sequences(x_test)
+x_test_padded = pad_sequences(x_test_ids, maxlen=max_len)
+x_test_padded = np.asarray(x_test_padded).astype('float32')
+y_pred_test = model.predict(x_test_padded).flatten()
+y_pred_test = (y_pred_test >= 0.1).astype('float32')
+
+np.savetxt('パス.csv', y_pred_test)
